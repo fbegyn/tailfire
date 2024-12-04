@@ -9,18 +9,16 @@ import (
 	"os"
 	"testing"
 
-	"github.com/go-kit/log"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v2"
-
-	"github.com/prometheus/prometheus/discovery"
+	"tailscale.com/client/tailscale"
 )
 
 var tailscaleTestAPIKey = "tskey-foo-bar"
 
 func TestTailscaleRefresh(t *testing.T) {
+	tailscale.I_Acknowledge_This_API_Is_Unstable = true
 	mock := httptest.NewServer(http.HandlerFunc(MockTailscaleAPI))
 	defer mock.Close()
 
@@ -33,28 +31,24 @@ api_token: %s
 	var cfg SDConfig
 	require.NoError(t, yaml.UnmarshalStrict([]byte(cfgString), &cfg))
 
-	reg := prometheus.NewRegistry()
-	refreshMetrics := discovery.NewRefreshMetrics(reg)
-	metrics := cfg.NewDiscovererMetrics(reg, refreshMetrics)
-	require.NoError(t, metrics.Register())
-
-	d, err := NewDiscovery(&cfg, log.NewNopLogger(), metrics)
+	d, err := NewDiscovery(&cfg, nil)
+	if err != nil {
+		fmt.Println(err)
+	}
 	require.NoError(t, err)
 
 	ctx := context.Background()
 	tgs, err := d.refresh(ctx)
+	if err != nil {
+		fmt.Println(err)
+	}
 	require.NoError(t, err)
 
-	require.Len(t, tgs, 1)
-
-	tg := tgs[0]
-	require.NotNil(t, tg)
-	require.NotNil(t, tg.Targets)
-	require.Len(t, tg.Targets, 3)
+	require.Len(t, tgs, 3)
 
 	for i, lbls := range []model.LabelSet{
 		{
-			"__address__":                                         "100.101.101.102:0",
+			"__address__":                                         "100.101.101.102",
 			"__meta_tailscale_device_addresses":                   ",100.101.101.102,1234:5678:90ab:cdef:1234:5678:90ab:cdef,",
 			"__meta_tailscale_device_id":                          "0000000000000002",
 			"__meta_tailscale_device_name":                        "test.foo.bar",
@@ -70,7 +64,7 @@ api_token: %s
 			"__meta_tailscale_device_blocks_incoming_connections": "false",
 		},
 		{
-			"__address__":                                         "100.101.101.103:0",
+			"__address__":                                         "100.101.101.103",
 			"__meta_tailscale_device_addresses":                   ",100.101.101.103,1234:5678:90ab:c3ef:1234:5678:90ab:cdef,",
 			"__meta_tailscale_device_id":                          "0000000000000003",
 			"__meta_tailscale_device_name":                        "test.foo.bar",
@@ -86,7 +80,7 @@ api_token: %s
 			"__meta_tailscale_device_blocks_incoming_connections": "false",
 		},
 		{
-			"__address__":                                         "100.101.101.104:0",
+			"__address__":                                         "100.101.101.104",
 			"__meta_tailscale_device_addresses":                   ",100.101.101.104,1234:5678:90ab:c4ef:1234:5678:90ab:cdef,",
 			"__meta_tailscale_device_id":                          "0000000000000004",
 			"__meta_tailscale_device_name":                        "prometheus.foo.bar",
@@ -105,7 +99,15 @@ api_token: %s
 		},
 	} {
 		t.Run(fmt.Sprintf("item %d", i), func(t *testing.T) {
-			require.Equal(t, lbls, tg.Targets[i])
+			// check sizing on each targetGroup
+			tg := tgs[i]
+			require.NotNil(t, tg)
+			require.NotNil(t, tg.Targets)
+			require.Len(t, tg.Targets, 1)
+
+			// validate the targetGroup value
+			require.Equal(t, lbls, tgs[i].Targets[0])
+			require.Equal(t, lbls, tgs[i].Labels)
 		})
 	}
 }
@@ -118,7 +120,7 @@ func MockTailscaleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.Path == "/api/v2/tailnet/-/devices" {
-		tailnetList, err := os.ReadFile("testdata/tailnet.json")
+		tailnetList, err := os.ReadFile("../../testdata/tailnet.json")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
